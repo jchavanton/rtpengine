@@ -273,8 +273,8 @@ struct packet_stream {
 				*ssrc_out;	/* LOCK: out_lock */
 	struct send_timer	*send_timer;	/* RO */
 	struct jitter_buffer	*jb;		/* RO */
-
 	struct stats		stats;
+	struct qos_stats	qos_stats;
 	struct stats		kernel_stats;
 	atomic64		last_packet;
 	GHashTable		*rtp_stats;	/* LOCK: call->master_lock */

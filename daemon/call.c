@@ -2449,6 +2449,14 @@ void call_destroy(struct call *c) {
 						atomic64_get(&ps->stats.errors),
 						rtpe_now.tv_sec - atomic64_get(&ps->last_packet));
 
+				struct qos_stats *stats = &ps->qos_stats;
+				if (stats->packets_rx > 0) {
+					ilog(LOG_INFO, "-------- RTP QoS Rx:%d lost:%d ooo:%d jitter:%.3lfts sampling_rate:%dhz jitter:%dms",
+						stats->packets_rx, stats->packets_lost, stats->packets_ooo,
+						stats->inter_arrival_jitter, stats->sampling_rate,
+						(int)(stats->inter_arrival_jitter/(stats->sampling_rate/1000)));
+				}
+
 				statistics_update_totals(ps);
 			}
 		}
