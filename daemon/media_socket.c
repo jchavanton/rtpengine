@@ -1973,6 +1973,76 @@ out:
 	return ret;
 }
 
+static void update_qos_stats(struct media_packet *mp) {
+	if (!mp || !mp->rtp) return;
+	struct rtp_header *rtp = mp->rtp;
+	struct packet_stream *stream = mp->sfd->stream;
+	qos_stats_t *stats = &stream->qos_stats;
+	u_int16_t seq = ntohs(rtp->seq_num);
+	u_int8_t pt = rtp->m_pt & 0b01111111;
+	struct timeval now;
+	gettimeofday(&now, NULL);
+	int64_t now_ms = now.tv_sec*1000LL + now.tv_usec/1000;
+
+	if (stats->packets_rx == 0) {
+		const struct rtp_payload_type *rtp_pt = rtp_payload_type(pt, mp->media->codecs_recv);
+		memset(stats, 0, sizeof(qos_stats_t));
+		if (rtp_pt && rtp_pt->clock_rate > 0) {
+			stats->sampling_rate = rtp_pt->clock_rate;
+			ilog(LOG_WARNING, "[RTP info]clock_rate[%d]", rtp_pt->clock_rate);
+		} else {
+			stats->sampling_rate = 8000;
+			ilog(LOG_WARNING, "[RTP info]clock_rate[8000] (default)");
+		}
+		stats->start_ms = now_ms;
+		stats->start_ts = ntohl(rtp->timestamp);
+		stats->packets_rx++;
+		stats->seq_start = seq;
+		stats->seq_high = seq; // initilization
+		stats->last_pkt_tsdiff = 0;
+		stats->inter_arrival_jitter = 0;
+		return;
+	}
+
+	// TODO Proper detectiion of RTP session reset/change.
+	// TODO Support for multiple payloads.
+
+	rwlock_lock_r(&mp->call->master_lock);
+
+	// packet loss logic
+	if (seq - stats->seq_high == 1) {
+		stats->seq_high = seq;
+	} else if ((seq - stats->seq_high) > (1<<15)) {
+		// gap too large, out of order packets after cycle change
+		stats->packets_ooo++;
+	} else if (seq > stats->seq_high) {
+		stats->seq_high = seq;
+	} else if (seq < 200 && stats->seq_high > (1<<16) - 200) {
+		// sequence ID cycle detected
+		stats->seq_high = seq;
+		stats->seq_cycle++;
+	} else {
+		// old packet received, must be out of order
+		stats->packets_ooo++;
+	}
+	stats->packets_rx++;
+	stats->seq_ext = (stats->seq_cycle<<16) + stats->seq_high;
+	int expected_packets = stats->seq_ext - stats->seq_start + 1;
+	stats->packets_lost = expected_packets - stats->packets_rx;
+
+	// Interarrival jitter computation
+	u_int32_t now_ts = (now_ms - stats->start_ms)*(stats->sampling_rate/1000)+stats->start_ts;
+	int32_t pkt_tsdiff = now_ts - ntohl(rtp->timestamp); /* relative transit times for this packet */
+	int32_t packet_spacing_diff = pkt_tsdiff - stats->last_pkt_tsdiff; /* Jitter : difference of relative transit times for the two packets */
+	stats->last_pkt_tsdiff = pkt_tsdiff;
+	/* Interarrival jitter estimation, "J(i) = J(i-1) + ( |D(i-1,i)| - J(i-1) )/16" */
+	stats->inter_arrival_jitter = (stats->inter_arrival_jitter + (((double)abs(packet_spacing_diff) - stats->inter_arrival_jitter) /16.));
+
+	ilog(LOG_WARNING, "[RTP Rx QoS]rx[%d]lost[%d]ooo[%d]ssrc[%x]ts[%"PRIu32"]seq[%u]ts[%"PRIu32"]<>[%"PRIu32"]pt[%u]",
+                     stats->packets_rx, stats->packets_lost, stats->packets_ooo,
+                     ntohl(rtp->ssrc), ntohl(rtp->timestamp), ntohs(rtp->seq_num), ntohl(rtp->timestamp), now_ts, pt);
+	rwlock_unlock_r(&mp->call->master_lock);
+}
 
 static void stream_fd_readable(int fd, void *p, uintptr_t u) {
 	struct stream_fd *sfd = p;
@@ -2022,6 +2092,8 @@ static void stream_fd_readable(int fd, void *p, uintptr_t u) {
 		}
 		else
 			ret = stream_packet(&phc);
+
+		update_qos_stats(&phc.mp);
 
 		if (G_UNLIKELY(ret < 0))
 			ilog(LOG_WARNING, "Write error on media socket: %s", strerror(-ret));
