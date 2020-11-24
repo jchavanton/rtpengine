@@ -7,6 +7,21 @@
 struct call;
 struct packet_stream;
 
+typedef struct qos_stats {
+	int64_t		start_ms; // timestamp in ms at the first packet
+	u_int32_t	start_ts; // timestamp in samples at the first packet
+	u_int32_t	last_pkt_tsdiff; // timestamp arrival timestamp delta
+	double		inter_arrival_jitter;
+	int32_t		sampling_rate;
+	u_int32_t	packets_lost; // lost packets
+	u_int32_t	packets_ooo;  // out of order packets
+	u_int32_t	packets_rx;   // received packets
+	u_int16_t	seq_start;    // lowest received sequence number
+	u_int16_t	seq_high;     // highest received sequence number
+	u_int16_t	seq_cycle;    // sequence number cycle
+	u_int32_t	seq_ext;      // highest received extended sequence number
+} qos_stats_t;
+
 struct stats {
 	atomic64			packets;
 	atomic64			bytes;

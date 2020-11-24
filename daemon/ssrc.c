@@ -276,7 +276,7 @@ found:;
 	mutex_unlock(&e->h.lock);
 
 	rtt -= (long long) delay * 1000000LL / 65536LL;
-	ilog(LOG_DEBUG, "Calculated round-trip time for %s%x%s is %lli us", FMT_M(ssrc), rtt);
+	ilog(LOG_WARNING, "Calculated round-trip time for %s%x%s is %lli us", FMT_M(ssrc), rtt);
 
 	if (rtt <= 0 || rtt > 10000000) {
 		ilog(LOG_DEBUG, "Invalid RTT - discarding");
@@ -314,7 +314,7 @@ void ssrc_receiver_report(struct call_media *m, const struct ssrc_receiver_repor
 {
 	struct call *c = m->call;
 
-	ilog(LOG_DEBUG, "RR from %s%x%s about %s%x%s: FL %u TL %u HSR %u J %u LSR %u DLSR %u",
+	ilog(LOG_WARNING, "RR from %s%x%s about %s%x%s: FL %u TL %u HSR %u J %u LSR %u DLSR %u",
 			FMT_M(rr->from), FMT_M(rr->ssrc), rr->fraction_lost, rr->packets_lost,
 			rr->high_seq_received, rr->jitter, rr->lsr, rr->dlsr);
 
@@ -339,20 +339,21 @@ void ssrc_receiver_report(struct call_media *m, const struct ssrc_receiver_repor
 		goto out_nl_put;
 	}
 	unsigned int jitter = rpt->clock_rate ? (rr->jitter * 1000 / rpt->clock_rate) : rr->jitter;
-	ilog(LOG_DEBUG, "Calculated jitter for %s%x%s is %u ms", FMT_M(rr->ssrc), jitter);
+	ilog(LOG_WARNING, "Calculated jitter for %s%x%s is %u ms", FMT_M(rr->ssrc), jitter);
 
-	ilog(LOG_DEBUG, "Adding opposide side RTT of %u us", other_e->last_rtt);
+	ilog(LOG_WARNING, "Adding opposide side RTT of %u us", other_e->last_rtt);
 
 	struct ssrc_stats_block *ssb = g_slice_alloc(sizeof(*ssb));
 	*ssb = (struct ssrc_stats_block) {
 		.jitter = jitter,
 		.rtt = rtt + other_e->last_rtt,
+		.rtt_leg = rtt,
 		.reported = *tv,
 		.packetloss = (unsigned int) rr->fraction_lost * 100 / 256,
 	};
 
 	mos_calc(ssb);
-	ilog(LOG_DEBUG, "Calculated MOS from RR for %s%x%s is %.1f", FMT_M(rr->from), (double) ssb->mos / 10.0);
+	ilog(LOG_WARNING, "Calculated MOS from RR for %s%x%s is %.1f", FMT_M(rr->from), (double) ssb->mos / 10.0);
 
 	// got a new stats block, add it to reporting ssrc
 	mutex_lock(&other_e->h.lock);
@@ -376,6 +377,7 @@ void ssrc_receiver_report(struct call_media *m, const struct ssrc_receiver_repor
 	// running tally
 	other_e->average_mos.jitter += ssb->jitter;
 	other_e->average_mos.rtt += ssb->rtt;
+	other_e->average_mos.rtt_leg += ssb->rtt_leg;
 	other_e->average_mos.packetloss += ssb->packetloss;
 	other_e->average_mos.mos += ssb->mos;
 
