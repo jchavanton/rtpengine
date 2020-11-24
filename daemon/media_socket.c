@@ -2038,7 +2038,7 @@ static void update_qos_stats(struct media_packet *mp) {
 	/* Interarrival jitter estimation, "J(i) = J(i-1) + ( |D(i-1,i)| - J(i-1) )/16" */
 	stats->inter_arrival_jitter = (stats->inter_arrival_jitter + (((double)abs(packet_spacing_diff) - stats->inter_arrival_jitter) /16.));
 
-	ilog(LOG_WARNING, "[RTP Rx QoS]rx[%d]lost[%d]ooo[%d]ssrc[%x]ts[%"PRIu32"]seq[%u]ts[%"PRIu32"]<>[%"PRIu32"]pt[%u]",
+	ilog(LOG_DEBUG, "[RTP Rx QoS]rx[%d]lost[%d]ooo[%d]ssrc[%x]ts[%"PRIu32"]seq[%u]ts[%"PRIu32"]<>[%"PRIu32"]pt[%u]",
                      stats->packets_rx, stats->packets_lost, stats->packets_ooo,
                      ntohl(rtp->ssrc), ntohl(rtp->timestamp), ntohs(rtp->seq_num), ntohl(rtp->timestamp), now_ts, pt);
 	rwlock_unlock_r(&mp->call->master_lock);
