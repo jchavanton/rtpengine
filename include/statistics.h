@@ -20,6 +20,8 @@ typedef struct qos_stats {
 	u_int16_t	seq_max;     // highest received sequence number
 	u_int32_t	seq_cycles;  // shifted count of seq. number cycles
 	u_int32_t	seq_ext_max; // highest received extended sequence number
+	u_int32_t	seq_bad;     // last 'bad' seq number + 1
+	u_int32_t       probation;   // sequ. packets till source is valid 
 } qos_stats_t;
 
 struct stats {

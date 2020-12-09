@@ -1979,13 +1979,15 @@ const int MIN_SEQUENTIAL = 2;
 #define RTP_SEQ_MOD (1<<16)
 
 static void init_qos_seq(struct media_packet *mp) {
-	rwlock_lock_r(&mp->call->master_lock);
 	struct rtp_header *rtp = mp->rtp;
 	struct packet_stream *stream = mp->sfd->stream;
 	qos_stats_t *s = &stream->qos_stats;
 	u_int16_t seq = ntohs(rtp->seq_num);
 	u_int8_t pt = rtp->m_pt & 0b01111111;
 	const struct rtp_payload_type *rtp_pt = rtp_payload_type(pt, mp->media->codecs_recv);
+	struct timeval now;
+	gettimeofday(&now, NULL);
+	int64_t now_ms = now.tv_sec*1000LL + now.tv_usec/1000;
 
 	memset(s, 0, sizeof(qos_stats_t));
 	if (rtp_pt && rtp_pt->clock_rate > 0) {
@@ -1997,28 +1999,21 @@ static void init_qos_seq(struct media_packet *mp) {
 	}
 	s->start_ms = now_ms;
 	s->start_ts = ntohl(rtp->timestamp);
-	s->packets_rx++;
 	s->seq_start = seq;
-	s->seq_max = seq; // initilization
+	s->seq_max = seq;
 	s->last_pkt_tsdiff = 0;
 	s->inter_arrival_jitter = 0;
-	s->probation = MIN_SEQUENTIAL;
-
-	rwlock_unlock_r(&mp->call->master_lock);
 }
 
-static int update_qos_seq(struct media_packet *mp) {
-	qos_stats_t *s = &stream->qos_stats;
-	rwlock_lock_r(&mp->call->master_lock);
-
-	u_int16 udelta = seq - s->seq_max;
+static int update_qos_seq(struct media_packet *mp, qos_stats_t *s, u_int16_t seq) {
+	u_int16_t udelta = seq - s->seq_max;
 	if (s->probation) {
 		if (seq == s->seq_max + 1) {
 			s->seq_max = seq;
 			s->probation--;
 			if (s->probation == 0) {
 				init_qos_seq(mp);
-				s->packet_rx++;
+				s->packets_rx++;
 				return 1;
 			}
 		} else {
@@ -2040,23 +2035,21 @@ static int update_qos_seq(struct media_packet *mp) {
 	                * restarted without telling us so just re-sync
 	                * (i.e., pretend this was the first packet). */
 			init_qos_seq(mp);
+			s->probation = MIN_SEQUENTIAL;
 		} else {
 			s->seq_bad = (seq + 1) & (RTP_SEQ_MOD-1);
 			return 0;
-		} else {
-			/* duplicate or reordered packet */
-			s->packets_ooo++;
 		}
-		s->packet_rx++;
-		return 1;
+	} else {
+		/* duplicate or reordered packet */
+		s->packets_ooo++;
 	}
-
-	rwlock_unlock_r(&mp->call->master_lock);
+	s->packets_rx++;
+	return 1;
 }
 
 static void update_qos_stats(struct media_packet *mp) {
 	if (!mp || !mp->rtp) return;
-
 	// TO DO Support for multiple payloads.
 	struct rtp_header *rtp = mp->rtp;
 	struct packet_stream *stream = mp->sfd->stream;
@@ -2066,9 +2059,18 @@ static void update_qos_stats(struct media_packet *mp) {
 	gettimeofday(&now, NULL);
 	int64_t now_ms = now.tv_sec*1000LL + now.tv_usec/1000;
 
-	if (s->packets_rx == 0 && s->probation == 0)
+	rwlock_lock_r(&mp->call->master_lock);
+	if (s->packets_rx == 0 && s->probation == 0) {
 		init_qos_seq(mp);
-	if (!update_qos_seq(mp)) return;
+		s->probation = MIN_SEQUENTIAL;
+	}
+	if (!update_qos_seq(mp, s, seq)) {
+		rwlock_unlock_r(&mp->call->master_lock);
+		ilog(LOG_WARNING, "[RTP Rx QoS][error]rx[%d]lost[%d]ooo[%d]ssrc[%x]ts[%"PRIu32"]seq[%u]ts[%"PRIu32"]",
+                     s->packets_rx, s->packets_lost, s->packets_ooo,
+                     ntohl(rtp->ssrc), ntohl(rtp->timestamp), ntohs(rtp->seq_num), ntohl(rtp->timestamp));
+	       	return;
+	}
 
 	// packet loss logic
 	s->seq_ext_max = s->seq_cycles + s->seq_max;
@@ -2083,7 +2085,7 @@ static void update_qos_stats(struct media_packet *mp) {
 	/* Interarrival jitter estimation, "J(i) = J(i-1) + ( |D(i-1,i)| - J(i-1) )/16" */
 	s->inter_arrival_jitter = (s->inter_arrival_jitter + (((double)abs(packet_spacing_diff) - s->inter_arrival_jitter) /16.));
 
-	ilog(LOG_DEBUG, "[RTP Rx QoS]rx[%d]lost[%d]ooo[%d]ssrc[%x]ts[%"PRIu32"]seq[%u]ts[%"PRIu32"]<>[%"PRIu32"]",
+	ilog(LOG_WARNING, "[RTP Rx QoS]rx[%d]lost[%d]ooo[%d]ssrc[%x]ts[%"PRIu32"]seq[%u]ts[%"PRIu32"]<>[%"PRIu32"]",
                      s->packets_rx, s->packets_lost, s->packets_ooo,
                      ntohl(rtp->ssrc), ntohl(rtp->timestamp), ntohs(rtp->seq_num), ntohl(rtp->timestamp), now_ts);
 	rwlock_unlock_r(&mp->call->master_lock);
