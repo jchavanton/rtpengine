@@ -1973,74 +1973,119 @@ out:
 	return ret;
 }
 
-static void update_qos_stats(struct media_packet *mp) {
-	if (!mp || !mp->rtp) return;
+const int MAX_DROPOUT = 3000;
+const int MAX_MISORDER = 100;
+const int MIN_SEQUENTIAL = 2;
+#define RTP_SEQ_MOD (1<<16)
+
+static void init_qos_seq(struct media_packet *mp) {
+	rwlock_lock_r(&mp->call->master_lock);
 	struct rtp_header *rtp = mp->rtp;
 	struct packet_stream *stream = mp->sfd->stream;
-	qos_stats_t *stats = &stream->qos_stats;
+	qos_stats_t *s = &stream->qos_stats;
 	u_int16_t seq = ntohs(rtp->seq_num);
 	u_int8_t pt = rtp->m_pt & 0b01111111;
+	const struct rtp_payload_type *rtp_pt = rtp_payload_type(pt, mp->media->codecs_recv);
+
+	memset(s, 0, sizeof(qos_stats_t));
+	if (rtp_pt && rtp_pt->clock_rate > 0) {
+		s->sampling_rate = rtp_pt->clock_rate;
+		ilog(LOG_WARNING, "[RTP info]clock_rate[%d]", rtp_pt->clock_rate);
+	} else {
+		s->sampling_rate = 8000;
+		ilog(LOG_WARNING, "[RTP info]clock_rate[8000] (default)");
+	}
+	s->start_ms = now_ms;
+	s->start_ts = ntohl(rtp->timestamp);
+	s->packets_rx++;
+	s->seq_start = seq;
+	s->seq_max = seq; // initilization
+	s->last_pkt_tsdiff = 0;
+	s->inter_arrival_jitter = 0;
+	s->probation = MIN_SEQUENTIAL;
+
+	rwlock_unlock_r(&mp->call->master_lock);
+}
+
+static int update_qos_seq(struct media_packet *mp) {
+	qos_stats_t *s = &stream->qos_stats;
+	rwlock_lock_r(&mp->call->master_lock);
+
+	u_int16 udelta = seq - s->seq_max;
+	if (s->probation) {
+		if (seq == s->seq_max + 1) {
+			s->seq_max = seq;
+			s->probation--;
+			if (s->probation == 0) {
+				init_qos_seq(mp);
+				s->packet_rx++;
+				return 1;
+			}
+		} else {
+			s->probation = MIN_SEQUENTIAL - 1;
+			s->seq_max = seq;
+			return 0;
+		}
+	} else if (udelta < MAX_DROPOUT) {
+		/* in order, with permissible gap */
+		if (seq < s->seq_max) {
+			/* Sequence number wrapped - count another 64K cycle. */
+			s->seq_cycles += RTP_SEQ_MOD;
+		}
+		s->seq_max = seq;
+	} else if (udelta <= RTP_SEQ_MOD - MAX_MISORDER) {
+		/* the sequence number made a very large jump */
+		if (seq == s->seq_bad) {
+	               /* Two sequential packets -- assume that the other side
+	                * restarted without telling us so just re-sync
+	                * (i.e., pretend this was the first packet). */
+			init_qos_seq(mp);
+		} else {
+			s->seq_bad = (seq + 1) & (RTP_SEQ_MOD-1);
+			return 0;
+		} else {
+			/* duplicate or reordered packet */
+			s->packets_ooo++;
+		}
+		s->packet_rx++;
+		return 1;
+	}
+
+	rwlock_unlock_r(&mp->call->master_lock);
+}
+
+static void update_qos_stats(struct media_packet *mp) {
+	if (!mp || !mp->rtp) return;
+
+	// TO DO Support for multiple payloads.
+	struct rtp_header *rtp = mp->rtp;
+	struct packet_stream *stream = mp->sfd->stream;
+	qos_stats_t *s = &stream->qos_stats;
+	u_int16_t seq = ntohs(rtp->seq_num);
 	struct timeval now;
 	gettimeofday(&now, NULL);
 	int64_t now_ms = now.tv_sec*1000LL + now.tv_usec/1000;
 
-	if (stats->packets_rx == 0) {
-		const struct rtp_payload_type *rtp_pt = rtp_payload_type(pt, mp->media->codecs_recv);
-		memset(stats, 0, sizeof(qos_stats_t));
-		if (rtp_pt && rtp_pt->clock_rate > 0) {
-			stats->sampling_rate = rtp_pt->clock_rate;
-			ilog(LOG_WARNING, "[RTP info]clock_rate[%d]", rtp_pt->clock_rate);
-		} else {
-			stats->sampling_rate = 8000;
-			ilog(LOG_WARNING, "[RTP info]clock_rate[8000] (default)");
-		}
-		stats->start_ms = now_ms;
-		stats->start_ts = ntohl(rtp->timestamp);
-		stats->packets_rx++;
-		stats->seq_start = seq;
-		stats->seq_high = seq; // initilization
-		stats->last_pkt_tsdiff = 0;
-		stats->inter_arrival_jitter = 0;
-		return;
-	}
-
-	// TODO Proper detectiion of RTP session reset/change.
-	// TODO Support for multiple payloads.
-
-	rwlock_lock_r(&mp->call->master_lock);
+	if (s->packets_rx == 0 && s->probation == 0)
+		init_qos_seq(mp);
+	if (!update_qos_seq(mp)) return;
 
 	// packet loss logic
-	if (seq - stats->seq_high == 1) {
-		stats->seq_high = seq;
-	} else if ((seq - stats->seq_high) > (1<<15)) {
-		// gap too large, out of order packets after cycle change
-		stats->packets_ooo++;
-	} else if (seq > stats->seq_high) {
-		stats->seq_high = seq;
-	} else if (seq < 200 && stats->seq_high > (1<<16) - 200) {
-		// sequence ID cycle detected
-		stats->seq_high = seq;
-		stats->seq_cycle++;
-	} else {
-		// old packet received, must be out of order
-		stats->packets_ooo++;
-	}
-	stats->packets_rx++;
-	stats->seq_ext = (stats->seq_cycle<<16) + stats->seq_high;
-	int expected_packets = stats->seq_ext - stats->seq_start + 1;
-	stats->packets_lost = expected_packets - stats->packets_rx;
+	s->seq_ext_max = s->seq_cycles + s->seq_max;
+	int expected_packets = s->seq_ext_max - s->seq_start + 1;
+	s->packets_lost = expected_packets - s->packets_rx;
 
 	// Interarrival jitter computation
-	u_int32_t now_ts = (now_ms - stats->start_ms)*(stats->sampling_rate/1000)+stats->start_ts;
+	u_int32_t now_ts = (now_ms - s->start_ms)*(s->sampling_rate/1000)+s->start_ts;
 	int32_t pkt_tsdiff = now_ts - ntohl(rtp->timestamp); /* relative transit times for this packet */
-	int32_t packet_spacing_diff = pkt_tsdiff - stats->last_pkt_tsdiff; /* Jitter : difference of relative transit times for the two packets */
-	stats->last_pkt_tsdiff = pkt_tsdiff;
+	int32_t packet_spacing_diff = pkt_tsdiff - s->last_pkt_tsdiff; /* Jitter : difference of relative transit times for the two packets */
+	s->last_pkt_tsdiff = pkt_tsdiff;
 	/* Interarrival jitter estimation, "J(i) = J(i-1) + ( |D(i-1,i)| - J(i-1) )/16" */
-	stats->inter_arrival_jitter = (stats->inter_arrival_jitter + (((double)abs(packet_spacing_diff) - stats->inter_arrival_jitter) /16.));
+	s->inter_arrival_jitter = (s->inter_arrival_jitter + (((double)abs(packet_spacing_diff) - s->inter_arrival_jitter) /16.));
 
-	ilog(LOG_DEBUG, "[RTP Rx QoS]rx[%d]lost[%d]ooo[%d]ssrc[%x]ts[%"PRIu32"]seq[%u]ts[%"PRIu32"]<>[%"PRIu32"]pt[%u]",
-                     stats->packets_rx, stats->packets_lost, stats->packets_ooo,
-                     ntohl(rtp->ssrc), ntohl(rtp->timestamp), ntohs(rtp->seq_num), ntohl(rtp->timestamp), now_ts, pt);
+	ilog(LOG_DEBUG, "[RTP Rx QoS]rx[%d]lost[%d]ooo[%d]ssrc[%x]ts[%"PRIu32"]seq[%u]ts[%"PRIu32"]<>[%"PRIu32"]",
+                     s->packets_rx, s->packets_lost, s->packets_ooo,
+                     ntohl(rtp->ssrc), ntohl(rtp->timestamp), ntohs(rtp->seq_num), ntohl(rtp->timestamp), now_ts);
 	rwlock_unlock_r(&mp->call->master_lock);
 }
 
