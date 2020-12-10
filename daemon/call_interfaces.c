@@ -1561,6 +1561,25 @@ stats:
 	dict = bencode_dictionary_add_dictionary(output, "totals");
 	ng_stats(bencode_dictionary_add_dictionary(dict, "RTP"), &totals->totals[0], NULL);
 	ng_stats(bencode_dictionary_add_dictionary(dict, "RTCP"), &totals->totals[1], NULL);
+	// adding perleg stats
+	for (l = c->monologues.head; l; l = l->next) {
+		ml = l->data;
+		for (k = ml->medias.head; k; k = k->next) {
+			md = k->data;
+			for (o = md->streams.head; o; o = o->next) {
+				ps = o->data;
+				struct qos_stats *stats = &ps->qos_stats;
+				if (stats->packets_rx > 0) {
+					ilog(LOG_INFO, "-------- RTP QoS Rx:%d lost:%d ooo:%d jitter:%.3lfts sampling_rate:%dhz jitter:%dms",
+						stats->packets_rx, stats->packets_lost, stats->packets_ooo,
+						stats->inter_arrival_jitter, stats->sampling_rate,
+						(int)(stats->inter_arrival_jitter/(stats->sampling_rate/1000)));
+				}
+			}
+		}
+	// bencode_dictionary_add_integer(output, "created", call->created.tv_sec);
+	// encode_dictionary_add_integer(output, "round-trip time leg", sb->rtt_leg);
+	}
 }
 
 static void ng_list_calls(bencode_item_t *output, long long int limit) {
