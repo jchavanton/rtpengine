@@ -1512,6 +1512,44 @@ static void ng_stats_ssrc(bencode_item_t *dict, struct ssrc_hash *ht) {
 	g_list_free(ll);
 }
 
+void ng_medias_stats(struct call_monologue *ml, bencode_item_t *output) {
+	// adding perleg stats
+	ilog(LOG_INFO, "----> ng_medias_stats <----");
+	GList *k, *o;
+
+	for (k = ml->medias.head; k; k = k->next) {
+		struct call_media *md = k->data;
+		for (o = md->streams.head; o; o = o->next) {
+			struct packet_stream *ps=0;
+			ps = o->data;
+			struct qos_stats *s = &ps->qos_stats;
+			if (s->packets_rx > 0) {
+				ilog(LOG_INFO, "-------- RTP QoS Rx:%d lost:%d ooo:%d jitter:%.3lfts sampling_rate:%dhz jitter:%dms",
+					s->packets_rx, s->packets_lost, s->packets_ooo,
+					s->inter_arrival_jitter, s->sampling_rate,
+					(int)(s->inter_arrival_jitter/(s->sampling_rate/1000)));
+
+				GString *json = g_string_new("");
+				g_string_append_printf(json, "{\"received\": %d, \"lost\": %d, \"jitter\": %d }",
+						s->packets_rx,
+						s->packets_lost,
+						(int)(s->inter_arrival_jitter/(s->sampling_rate/1000))
+						);
+				bencode_dictionary_add_string(output, "rtp_qos_rx", json->str);
+				// bencode_dictionary_add_string(output, "rtp_qos_rx", "value x");
+				ilog(LOG_INFO, "[%s]", json->str);
+				//g_string_free(json, TRUE);
+				break;
+			}
+		}
+	}
+	int i;
+	ilog(LOG_INFO, "\n%s\n", bencode_collapse(output, &i));
+
+	// bencode_dictionary_add_integer(output, "created", call->created.tv_sec);
+	// encode_dictionary_add_integer(output, "round-trip time leg", sb->rtt_leg);
+}
+
 /* call must be locked */
 void ng_call_stats(struct call *call, const str *fromtag, const str *totag, bencode_item_t *output,
 		struct call_stats *totals)
@@ -1545,6 +1583,9 @@ stats:
 		for (l = call->monologues.head; l; l = l->next) {
 			ml = l->data;
 			ng_stats_monologue(tags, ml, totals);
+			//
+			ng_medias_stats(ml, output);
+
 		}
 	}
 	else {
@@ -1552,6 +1593,8 @@ stats:
 		if (ml) {
 			ng_stats_monologue(tags, ml, totals);
 			ng_stats_monologue(tags, ml->active_dialogue, totals);
+			//
+			ng_medias_stats(ml, output);
 		}
 	}
 
@@ -1561,25 +1604,7 @@ stats:
 	dict = bencode_dictionary_add_dictionary(output, "totals");
 	ng_stats(bencode_dictionary_add_dictionary(dict, "RTP"), &totals->totals[0], NULL);
 	ng_stats(bencode_dictionary_add_dictionary(dict, "RTCP"), &totals->totals[1], NULL);
-	// adding perleg stats
-	for (l = c->monologues.head; l; l = l->next) {
-		ml = l->data;
-		for (k = ml->medias.head; k; k = k->next) {
-			md = k->data;
-			for (o = md->streams.head; o; o = o->next) {
-				ps = o->data;
-				struct qos_stats *stats = &ps->qos_stats;
-				if (stats->packets_rx > 0) {
-					ilog(LOG_INFO, "-------- RTP QoS Rx:%d lost:%d ooo:%d jitter:%.3lfts sampling_rate:%dhz jitter:%dms",
-						stats->packets_rx, stats->packets_lost, stats->packets_ooo,
-						stats->inter_arrival_jitter, stats->sampling_rate,
-						(int)(stats->inter_arrival_jitter/(stats->sampling_rate/1000)));
-				}
-			}
-		}
-	// bencode_dictionary_add_integer(output, "created", call->created.tv_sec);
-	// encode_dictionary_add_integer(output, "round-trip time leg", sb->rtt_leg);
-	}
+
 }
 
 static void ng_list_calls(bencode_item_t *output, long long int limit) {
